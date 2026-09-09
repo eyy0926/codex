@@ -2,7 +2,15 @@
 
 > 基于大语言模型的自然语言数据查询工具：输入业务问题，自动生成并安全执行 SQL。
 
-![NL2SQL 智能查询系统界面](assets/nl2sql-dashboard.png)
+### 界面预览
+
+上传数据前的查询界面：
+
+![NL2SQL 上传数据前](assets/nl2sql-upload-ready.png)
+
+上传虚拟销售数据后，系统基于文件生成 SQL 并返回图表：
+
+![NL2SQL 上传数据后查询结果](assets/nl2sql-upload-result.png)
 
 ## 会议活动运营 Agent
 
