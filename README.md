@@ -17,12 +17,15 @@
 ## 快速启动
 
 ```bash
-cd work/nl2sql_app
+git clone https://github.com/eyy0926/codex.git
+cd codex
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-不配置 API Key 也能运行规则演示模式。若要接入模型，可设置 `DEEPSEEK_API_KEY`，或在侧边栏临时输入 Key。默认使用 DeepSeek OpenAI 兼容接口 `https://api.deepseek.com` 和你指定的模型 ID `deepseek-v4-pro`；如果接口提示模型不存在，请改成服务商控制台显示的准确名称。
+启动后，在左侧“数据源”上传 CSV/Excel，在问题输入框写下业务问题，点击“生成 SQL 并执行”。系统会展示生成的 SQL、查询结果、图表，并支持下载 CSV。
+
+不配置 API Key 也能运行规则演示模式。若要接入模型，可设置 `DEEPSEEK_API_KEY`，或在侧边栏临时输入 Key。默认使用 DeepSeek OpenAI 兼容接口 `https://api.deepseek.com` 和模型 ID `deepseek-v4-pro`；如果接口提示模型不存在，请改成服务商控制台显示的准确名称。
 
 ## 作品集亮点
 
