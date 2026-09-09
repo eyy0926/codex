@@ -1,5 +1,9 @@
 # NL2SQL 智能查询系统
 
+> 基于大语言模型的自然语言数据查询工具：输入业务问题，自动生成并安全执行 SQL。
+
+![NL2SQL 智能查询系统界面](assets/nl2sql-dashboard.png)
+
 ## 会议活动运营 Agent
 
 同一项目内附带 `meeting_agent.py`，可独立启动：
