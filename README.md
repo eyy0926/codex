@@ -24,7 +24,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-不配置 API Key 也能运行规则演示模式。若要接入模型，可设置 `OPENAI_API_KEY`，或在侧边栏临时输入 Key。
+不配置 API Key 也能运行规则演示模式。若要接入模型，可设置 `DEEPSEEK_API_KEY`，或在侧边栏临时输入 Key。默认使用 DeepSeek OpenAI 兼容接口 `https://api.deepseek.com` 和你指定的模型 ID `deepseek-v4-pro`；如果接口提示模型不存在，请改成服务商控制台显示的准确名称。
 
 ## 作品集亮点
 

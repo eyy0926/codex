@@ -15,10 +15,10 @@ from typing import Any
 import streamlit as st
 
 
-def call_llm(prompt: str, api_key: str, model: str) -> dict[str, Any]:
+def call_llm(prompt: str, api_key: str, model: str, base_url: str) -> dict[str, Any]:
     from openai import OpenAI  # type: ignore
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
     response = client.chat.completions.create(
         model=model,
         temperature=0.2,
@@ -74,14 +74,14 @@ def fallback_post_event(title: str, notes: str, attendees: str) -> dict[str, Any
     }
 
 
-def pre_event(title: str, date: str, location: str, audience: str, agenda: str, guests: str, api_key: str, model: str) -> dict[str, Any]:
+def pre_event(title: str, date: str, location: str, audience: str, agenda: str, guests: str, api_key: str, model: str, base_url: str) -> dict[str, Any]:
     prompt = f"""请为会议活动生成运营执行包。返回 JSON，字段必须为 event_card(对象)、guest_invites(数组)、reminders(数组)。
 event_card 包含：活动名称、时间、地点/线上链接、目标人群、活动目标、流程。
 guest_invites 每项包含：嘉宾、邀约标题、邀约正文、跟进时间。reminders 每项包含：节点、对象、渠道、内容。
 资料：活动名称={title}；时间={date}；地点={location}；目标人群={audience}；流程={agenda}；嘉宾={guests}"""
     if api_key.strip():
         try:
-            result = call_llm(prompt, api_key.strip(), model.strip())
+            result = call_llm(prompt, api_key.strip(), model.strip(), base_url.strip())
             result["source"] = "大语言模型"
             return result
         except Exception as exc:
@@ -89,13 +89,13 @@ guest_invites 每项包含：嘉宾、邀约标题、邀约正文、跟进时间
     return fallback_pre_event(title, date, location, audience, agenda, guests)
 
 
-def post_event(title: str, notes: str, attendees: str, api_key: str, model: str) -> dict[str, Any]:
+def post_event(title: str, notes: str, attendees: str, api_key: str, model: str, base_url: str) -> dict[str, Any]:
     prompt = f"""请根据会议纪要生成会后运营复盘。只返回 JSON，字段为 summary(字符串)、highlights(字符串数组)、todos(数组)、metrics(对象)。
 todos 每项包含：事项、负责人、截止时间、优先级；metrics 包含：参会人数、内容产出、下一步。
 活动名称：{title}\n参会人数：{attendees}\n会议纪要：\n{notes}"""
     if api_key.strip():
         try:
-            result = call_llm(prompt, api_key.strip(), model.strip())
+            result = call_llm(prompt, api_key.strip(), model.strip(), base_url.strip())
             result["source"] = "大语言模型"
             return result
         except Exception as exc:
@@ -126,9 +126,10 @@ st.caption("一份资料，自动完成会前筹备与会后复盘")
 
 with st.sidebar:
     st.header("模型设置")
-    api_key = st.text_input("OpenAI API Key（可选）", value=os.getenv("OPENAI_API_KEY", ""), type="password")
-    model = st.text_input("模型", value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-    st.info("未配置 Key 时使用规则演示模式；接入 Key 后自动切换为大语言模型。")
+    api_key = st.text_input("DeepSeek API Key（可选）", value=os.getenv("DEEPSEEK_API_KEY", ""), type="password")
+    base_url = st.text_input("API Base URL", value=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+    model = st.text_input("模型 ID", value=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"), help="已按你的要求预填 deepseek-v4-pro；若接口提示模型不存在，请改成服务商控制台显示的准确模型 ID。")
+    st.info("未配置 Key 时使用规则演示模式；接入 DeepSeek Key 后自动切换为大语言模型。")
 
 tab_pre, tab_post, tab_export = st.tabs(["会前筹备", "会后总结", "导出结果"])
 
@@ -144,7 +145,7 @@ with tab_pre:
         guests = st.text_area("嘉宾名单（每行一位）", "林老师｜AI 产品负责人\n周同学｜增长负责人", height=100, key="pre_guests")
     agenda = st.text_area("活动流程或原始资料", "14:00 开场\n14:10 AI 产品增长案例\n15:00 圆桌问答\n15:40 自由交流", height=110, key="pre_agenda")
     if st.button("生成会前执行包", type="primary", key="pre_run"):
-        st.session_state.pre_result = pre_event(title, date, location, audience, agenda, guests, api_key, model)
+        st.session_state.pre_result = pre_event(title, date, location, audience, agenda, guests, api_key, model, base_url)
     if st.session_state.get("pre_result"):
         result = st.session_state.pre_result
         st.success(f"执行包已生成 · {result.get('source', '')}")
@@ -165,7 +166,7 @@ with tab_post:
     attendees = st.text_input("参会人数", "86", key="post_attendees")
     notes = st.text_area("会议纪要/聊天记录", "- 嘉宾分享了用户增长实验方法\n- 现场提问集中在 AI Agent 落地\n- 多位参会者希望获得案例资料", height=180)
     if st.button("生成会后总结", type="primary", key="post_run"):
-        st.session_state.post_result = post_event(post_title, notes, attendees, api_key, model)
+        st.session_state.post_result = post_event(post_title, notes, attendees, api_key, model, base_url)
     if st.session_state.get("post_result"):
         result = st.session_state.post_result
         st.success(f"会后总结已生成 · {result.get('source', '')}")
@@ -181,4 +182,3 @@ with tab_export:
     export = markdown_export(st.session_state.get("pre_result"), st.session_state.get("post_result"))
     st.code(export, language="markdown")
     st.download_button("下载运营复盘 Markdown", export.encode("utf-8"), "meeting_ops_report.md", "text/markdown", use_container_width=True)
-

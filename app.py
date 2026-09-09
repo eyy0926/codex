@@ -98,11 +98,11 @@ orders(order_id INTEGER 主键, customer_id INTEGER, product_id INTEGER, order_d
 仅统计 status = '已支付' 的订单时，请在 WHERE 中过滤；日期字段格式为 YYYY-MM-DD。"""
 
 
-def get_llm_sql(question: str, api_key: str, model: str) -> tuple[str, str]:
-    """调用 OpenAI 兼容接口；导入失败或请求失败时由上层走规则兜底。"""
+def get_llm_sql(question: str, api_key: str, model: str, base_url: str) -> tuple[str, str]:
+    """调用 DeepSeek 的 OpenAI 兼容接口；失败时由上层走规则兜底。"""
     from openai import OpenAI  # type: ignore
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
     prompt = f"""你是资深数据分析师。根据用户问题生成 SQLite SQL。
 要求：只输出一条 SELECT 或 WITH 查询，不要 Markdown，不要解释；必须使用真实表和字段；默认限制最多 200 行。
 {schema_text()}
@@ -167,8 +167,9 @@ st.caption("用自然语言查询业务数据 · 自动生成 SQL · 安全只�
 
 with st.sidebar:
     st.header("连接设置")
-    api_key = st.text_input("OpenAI API Key（可选）", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-    model = st.text_input("模型", value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    api_key = st.text_input("DeepSeek API Key（可选）", type="password", value=os.getenv("DEEPSEEK_API_KEY", ""))
+    base_url = st.text_input("API Base URL", value=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+    model = st.text_input("模型 ID", value=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"), help="已按你的要求预填 deepseek-v4-pro；若接口提示模型不存在，请改成服务商控制台显示的准确模型 ID。")
     st.info("未填写 Key 时使用规则演示模式，适合快速体验。")
     st.divider()
     st.subheader("示例问题")
@@ -188,7 +189,7 @@ if run:
         with st.spinner("正在理解问题并生成查询…"):
             try:
                 if api_key.strip():
-                    sql, source = get_llm_sql(question.strip(), api_key.strip(), model.strip())
+                    sql, source = get_llm_sql(question.strip(), api_key.strip(), model.strip(), base_url.strip())
                 else:
                     sql, source = fallback_sql(question.strip())
             except Exception as exc:
@@ -231,4 +232,3 @@ with tab_history:
         st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
     else:
         st.caption("本次会话还没有查询记录。")
-
