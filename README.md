@@ -12,16 +12,6 @@
 
 ![NL2SQL 上传数据后查询结果](assets/nl2sql-upload-result.png)
 
-## 会议活动运营 Agent
-
-同一项目内附带 `meeting_agent.py`，可独立启动：
-
-```bash
-streamlit run meeting_agent.py
-```
-
-它能根据活动资料生成活动卡片、嘉宾邀约文案和分节点提醒，并根据会后纪要生成总结、亮点、待办和关键指标，支持 Markdown 导出。
-
 一个面向业务运营场景的自然语言查询 MVP。用户可以上传自己的 CSV/Excel，用中文提问，系统自动识别字段，通过大语言模型生成 SQLite SQL，经过只读安全校验后在上传数据上执行，并展示结果表格、柱状图和 CSV 下载。未上传文件时仍可使用内置合成销售库演示。
 
 ## 快速启动
