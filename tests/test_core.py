@@ -56,6 +56,8 @@ class CoreTests(unittest.TestCase):
             "WITH x AS (SELECT 1) DELETE FROM uploaded_data",
             "SELECT * FROM sqlite_master",
             "SELECT * FROM sqlite_temp_master",
+            "SELECT * FROM sqlite_temp_schema",
+            "SELECT * FROM sqlite_stat1",
         ]
         for sql in cases:
             self.assertFalse(validate_sql(sql)[0], sql)
@@ -69,6 +71,19 @@ class CoreTests(unittest.TestCase):
         # protect execution if a caller reaches it through another code path.
         with self.assertRaises(Exception):
             run_query("SELECT name FROM sqlite_master", self.data)
+
+    def test_authorizer_requires_main_uploaded_table(self):
+        import sqlite3
+        from nl2sql_core import _readonly_authorizer
+
+        self.assertEqual(
+            _readonly_authorizer(sqlite3.SQLITE_READ, "uploaded_data", "amount", "main", None),
+            sqlite3.SQLITE_OK,
+        )
+        self.assertEqual(
+            _readonly_authorizer(sqlite3.SQLITE_READ, "uploaded_data", "amount", "temp", None),
+            sqlite3.SQLITE_DENY,
+        )
 
     def test_paid_count_filters_refunds_when_requested(self):
         sql = fallback_sql("已支付订单数是多少？", self.data, self.mapping)

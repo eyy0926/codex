@@ -287,7 +287,10 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         r"\b(insert|update|delete|drop|alter|create|attach|detach|pragma|replace|"
         r"vacuum|reindex|analyze|load_extension)\b|sqlite_(master|schema)"
     )
-    if re.search(forbidden, normalized) or re.search(r"\bsqlite_[a-z_]+\b", normalized):
+    # Reject SQLite internal schemas/tables, including names with digits such
+    # as sqlite_stat1 and the temp-schema aliases sqlite_temp_*.
+    system_table = r"\bsqlite_(?:master|schema|sequence|stat\d*|temp_[a-z0-9_]*)\b"
+    if re.search(forbidden, normalized) or re.search(system_table, normalized):
         return False, "检测到写入、系统表或危险关键字，查询已拦截。"
     return True, ""
 
@@ -309,7 +312,8 @@ def _readonly_authorizer(action: int, _arg1: str, _arg2: str, _db: str, _trigger
     # bypassed or SQLite exposes an internal/temp schema name unexpectedly.
     if action == getattr(sqlite3, "SQLITE_READ", -1):
         table_name = str(_arg1 or "").lower()
-        if table_name != "uploaded_data":
+        database_name = str(_db or "").lower()
+        if table_name != "uploaded_data" or database_name != "main":
             return sqlite3.SQLITE_DENY
     if action == getattr(sqlite3, "SQLITE_FUNCTION", -1):
         function_name = str(_arg2 or _arg1 or "").lower()
