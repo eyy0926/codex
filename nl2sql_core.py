@@ -304,6 +304,13 @@ def _readonly_authorizer(action: int, _arg1: str, _arg2: str, _db: str, _trigger
         "SQLITE_REINDEX", "SQLITE_ANALYZE",
     ]
     blocked = {getattr(sqlite3, name) for name in blocked_names if hasattr(sqlite3, name)}
+    # The in-memory database is intentionally populated with one table only.
+    # Limiting reads here provides a second enforcement layer if validation is
+    # bypassed or SQLite exposes an internal/temp schema name unexpectedly.
+    if action == getattr(sqlite3, "SQLITE_READ", -1):
+        table_name = str(_arg1 or "").lower()
+        if table_name != "uploaded_data":
+            return sqlite3.SQLITE_DENY
     if action == getattr(sqlite3, "SQLITE_FUNCTION", -1):
         function_name = str(_arg2 or _arg1 or "").lower()
         allowed = {"abs", "avg", "cast", "coalesce", "count", "date", "julianday", "max", "min", "nullif", "round", "strftime", "substr", "sum", "total"}

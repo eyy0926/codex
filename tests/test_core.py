@@ -64,6 +64,12 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(Exception):
             run_query("SELECT randomblob(10) FROM uploaded_data", self.data)
 
+    def test_only_uploaded_table_can_be_read(self):
+        # Validation rejects system tables too, but the authorizer should still
+        # protect execution if a caller reaches it through another code path.
+        with self.assertRaises(Exception):
+            run_query("SELECT name FROM sqlite_master", self.data)
+
     def test_paid_count_filters_refunds_when_requested(self):
         sql = fallback_sql("已支付订单数是多少？", self.data, self.mapping)
         result, _ = run_query(sql, self.data)
