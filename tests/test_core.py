@@ -39,6 +39,12 @@ class CoreTests(unittest.TestCase):
         result = read_uploaded_file(uploaded)
         self.assertEqual(result.shape, (2, 2))
 
+    def test_unknown_file_extension_is_rejected(self):
+        uploaded = NamedBytesIO(b"a,b\n1,2\n")
+        uploaded.name = "test.txt"
+        with self.assertRaises(ValueError):
+            read_uploaded_file(uploaded)
+
     def test_schema_excludes_values_by_default(self):
         text = schema_text(self.data, self.mapping)
         self.assertNotIn("公众号", text)
@@ -49,9 +55,19 @@ class CoreTests(unittest.TestCase):
             "DROP TABLE uploaded_data",
             "WITH x AS (SELECT 1) DELETE FROM uploaded_data",
             "SELECT * FROM sqlite_master",
+            "SELECT * FROM sqlite_temp_master",
         ]
         for sql in cases:
             self.assertFalse(validate_sql(sql)[0], sql)
+
+    def test_expensive_sql_function_is_blocked_at_execution(self):
+        with self.assertRaises(Exception):
+            run_query("SELECT randomblob(10) FROM uploaded_data", self.data)
+
+    def test_paid_count_filters_refunds_when_requested(self):
+        sql = fallback_sql("已支付订单数是多少？", self.data, self.mapping)
+        result, _ = run_query(sql, self.data)
+        self.assertEqual(int(result.iloc[0]["记录数"]), 57)
 
     def test_query_result_is_capped(self):
         large = pd.DataFrame({"value": range(MAX_RESULT_ROWS + 20)})

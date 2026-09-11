@@ -60,7 +60,10 @@ def make_safe_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     mapping: dict[str, str] = {}
     used: set[str] = set()
     for index, original_value in enumerate(df.columns, start=1):
-        original = str(original_value).strip() or f"未命名列{index}"
+        if original_value is None or pd.isna(original_value):
+            original = f"未命名列{index}"
+        else:
+            original = str(original_value).strip() or f"未命名列{index}"
         candidate = original if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", original) else f"col_{index}"
         base = candidate
         suffix = 2
@@ -85,7 +88,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(BytesIO(raw))
-    else:
+    elif name.endswith(".csv"):
         last_error: Exception | None = None
         for encoding in ("utf-8-sig", "gb18030", "utf-8"):
             try:
@@ -95,6 +98,8 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
                 last_error = exc
         else:
             raise ValueError("无法识别 CSV 编码，请另存为 UTF-8 CSV。") from last_error
+    else:
+        raise ValueError("仅支持 CSV、XLSX 或 XLS 文件。")
     if df.empty or len(df.columns) == 0:
         raise ValueError("文件没有可查询的数据。")
     if len(df) > MAX_UPLOAD_ROWS:
@@ -110,7 +115,8 @@ def schema_text(df: pd.DataFrame, mapping: dict[str, str], include_samples: bool
         "字段（安全列名 | 原始列名 | 类型）：",
     ]
     for safe in df.columns:
-        lines.append(f"- {safe} | {mapping.get(str(safe), str(safe))} | {df[safe].dtype}")
+        original = re.sub(r"[\r\n\t]+", " ", mapping.get(str(safe), str(safe)))[:120]
+        lines.append(f"- {safe} | {original} | {df[safe].dtype}")
     if include_samples:
         sample = df.head(3).where(pd.notna(df.head(3)), None).to_dict(orient="records")
         lines.append("用户已允许发送的前三行样例：" + json.dumps(sample, ensure_ascii=False, default=str))
@@ -210,8 +216,9 @@ def fallback_sql(question: str, df: pd.DataFrame, mapping: dict[str, str]) -> st
     quantity = _find_column(mapping, ["quantity", "qty", "数量", "销量"])
     date = _find_column(mapping, ["date", "日期", "时间"])
     status = _find_column(mapping, ["status", "状态"])
-    id_col = _find_column(mapping, ["order_id", "订单号", "id"])
+    id_col = _find_column(mapping, ["order_id", "订单号"])
     count_requested = any(term in q for term in ["多少条", "多少笔", "订单数", "记录数", "有多少订单", "count"])
+    paid_requested = any(term in q for term in ["已支付", "支付成功", "paid"])
     dimensions = [
         (["渠道", "channel"], _find_column(mapping, ["channel", "渠道"]), "渠道"),
         (["商品", "产品", "product"], _find_column(mapping, ["product", "商品", "产品"]), "商品"),
@@ -238,7 +245,7 @@ def fallback_sql(question: str, df: pd.DataFrame, mapping: dict[str, str]) -> st
     else:
         metric = amount or quantity or (str(numeric[0]) if numeric else None)
     where = ""
-    if status and amount and "退款" not in q and not (count_requested and not any(term in q for term in ["销售额", "金额", "销售", "revenue", "sales"])):
+    if status and amount and "退款" not in q and (paid_requested or not count_requested or any(term in q for term in ["销售额", "金额", "销售", "revenue", "sales"])):
         values = set(df[status].dropna().astype(str).head(200).tolist())
         if "已支付" in values:
             where = f" WHERE {_quoted(status)} = '已支付'"
@@ -255,6 +262,8 @@ def fallback_sql(question: str, df: pd.DataFrame, mapping: dict[str, str]) -> st
         )
     if count_requested and not any(term in q for term in ["销售额", "金额", "销售", "revenue", "sales"]):
         count_expr = f"COUNT(DISTINCT {_quoted(id_col)})" if id_col else "COUNT(*)"
+        if "金额" in q and status and "退款" in q and amount:
+            return f"SELECT {count_expr} AS 订单数, ROUND(SUM({_quoted(amount)}), 2) AS 退款金额 FROM uploaded_data{where}"
         return f"SELECT {count_expr} AS 记录数 FROM uploaded_data{where}"
     if metric:
         return (
@@ -278,7 +287,7 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         r"\b(insert|update|delete|drop|alter|create|attach|detach|pragma|replace|"
         r"vacuum|reindex|analyze|load_extension)\b|sqlite_(master|schema)"
     )
-    if re.search(forbidden, normalized):
+    if re.search(forbidden, normalized) or re.search(r"\bsqlite_[a-z_]+\b", normalized):
         return False, "检测到写入、系统表或危险关键字，查询已拦截。"
     return True, ""
 
@@ -295,6 +304,11 @@ def _readonly_authorizer(action: int, _arg1: str, _arg2: str, _db: str, _trigger
         "SQLITE_REINDEX", "SQLITE_ANALYZE",
     ]
     blocked = {getattr(sqlite3, name) for name in blocked_names if hasattr(sqlite3, name)}
+    if action == getattr(sqlite3, "SQLITE_FUNCTION", -1):
+        function_name = str(_arg2 or _arg1 or "").lower()
+        allowed = {"abs", "avg", "cast", "coalesce", "count", "date", "julianday", "max", "min", "nullif", "round", "strftime", "substr", "sum", "total"}
+        if function_name and function_name not in allowed:
+            return sqlite3.SQLITE_DENY
     return sqlite3.SQLITE_DENY if action in blocked else sqlite3.SQLITE_OK
 
 
@@ -354,4 +368,5 @@ SQL：{sql}
     response = _client(api_key, base_url).chat.completions.create(
         model=model, temperature=0.2, messages=[{"role": "user", "content": prompt}]
     )
-    return (response.choices[0].message.content or "").strip()
+    insight = (response.choices[0].message.content or "").strip()
+    return insight or fallback_insight(question, result)

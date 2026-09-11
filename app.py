@@ -87,7 +87,7 @@ if active_data is None:
     st.info("请在左侧上传 CSV 或 Excel，或切换到“一键示例数据”。")
     st.stop()
 
-fingerprint = int(pd.util.hash_pandas_object(active_data.head(5), index=True).sum()) if not active_data.empty else 0
+fingerprint = int(pd.util.hash_pandas_object(active_data, index=True).sum()) if not active_data.empty else 0
 source_signature = f"{source_name}|{active_data.shape}|{fingerprint}|{','.join(map(str, active_data.columns))}"
 if st.session_state.get("result_source_signature") != source_signature:
     for key in ("last_result", "last_sql", "last_insight", "last_source", "last_truncated", "last_repaired"):
@@ -135,8 +135,17 @@ if run:
 
             valid, validation_error = validate_sql(sql)
             if not valid:
-                st.error(validation_error)
-                st.stop()
+                if api_key.strip():
+                    try:
+                        sql = repair_sql(question, schema, sql, validation_error, api_key.strip(), model.strip(), base_url.strip())
+                        valid, validation_error = validate_sql(sql)
+                        if valid:
+                            source = "大语言模型自动修复"
+                    except Exception:
+                        valid = False
+                if not valid:
+                    st.error(validation_error)
+                    st.stop()
 
             repaired = False
             try:
@@ -177,7 +186,8 @@ if run:
         st.session_state.last_truncated = truncated
         st.session_state.last_repaired = repaired
         st.session_state.history = st.session_state.get("history", [])
-        st.session_state.history.insert(0, {"时间": datetime.now().strftime("%H:%M:%S"), "问题": question, "模式": source, "返回行数": len(result), "SQL": sql})
+        st.session_state.history.insert(0, {"时间": datetime.now().strftime("%H:%M:%S"), "数据源": source_name, "问题": question, "模式": source, "返回行数": len(result), "SQL": sql})
+        st.session_state.history = st.session_state.history[:20]
 
 if st.session_state.get("last_result") is not None:
     result = st.session_state.last_result
