@@ -313,7 +313,10 @@ def _readonly_authorizer(action: int, _arg1: str, _arg2: str, _db: str, _trigger
     if action == getattr(sqlite3, "SQLITE_READ", -1):
         table_name = str(_arg1 or "").lower()
         database_name = str(_db or "").lower()
-        if table_name != "uploaded_data" or database_name != "main":
+        # COUNT(*) is reported with an empty database name by SQLite, while
+        # ordinary column reads carry ``main``. Both forms are safe when the
+        # table itself is the single uploaded_data table.
+        if table_name != "uploaded_data" or database_name not in {"", "main"}:
             return sqlite3.SQLITE_DENY
     if action == getattr(sqlite3, "SQLITE_FUNCTION", -1):
         function_name = str(_arg2 or _arg1 or "").lower()
