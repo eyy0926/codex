@@ -1,325 +1,247 @@
-"""NL2SQL 智能查询系统
-
-一个可直接运行的 Streamlit MVP：
-- 内置电商销售示例库，开箱即用
-- 有 OpenAI API Key 时调用大语言模型生成 SQL
-- 没有 API Key 时提供可演示的规则兜底
-- 只允许只读查询，并对危险 SQL 做拦截
-"""
+"""NL2SQL 智能查询系统 Streamlit 界面。"""
 
 from __future__ import annotations
 
 import os
-import re
-import sqlite3
 from datetime import datetime
-from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-
-APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / "demo_sales.db"
-
-
-def init_db() -> None:
-    """创建一份稳定的演示数据，便于面试现场直接演示。"""
-    if DB_PATH.exists():
-        return
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(
-        """
-        CREATE TABLE customers (
-            customer_id INTEGER PRIMARY KEY,
-            customer_name TEXT NOT NULL,
-            city TEXT NOT NULL,
-            signup_date TEXT NOT NULL
-        );
-        CREATE TABLE products (
-            product_id INTEGER PRIMARY KEY,
-            product_name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            unit_price REAL NOT NULL
-        );
-        CREATE TABLE orders (
-            order_id INTEGER PRIMARY KEY,
-            customer_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            order_date TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            channel TEXT NOT NULL,
-            status TEXT NOT NULL,
-            FOREIGN KEY(customer_id) REFERENCES customers(customer_id),
-            FOREIGN KEY(product_id) REFERENCES products(product_id)
-        );
-        """
-    )
-    conn.executemany("INSERT INTO customers VALUES (?, ?, ?, ?)", [
-        (1, "张晨", "北京", "2024-01-12"), (2, "李欣", "上海", "2024-02-03"),
-        (3, "王磊", "深圳", "2024-02-18"), (4, "赵敏", "杭州", "2024-03-08"),
-        (5, "陈宇", "北京", "2024-03-21"), (6, "周婷", "广州", "2024-04-01"),
-    ])
-    conn.executemany("INSERT INTO products VALUES (?, ?, ?, ?)", [
-        (1, "AI 入门课", "课程", 299.0), (2, "数据分析课", "课程", 499.0),
-        (3, "无线键盘", "硬件", 199.0), (4, "降噪耳机", "硬件", 699.0),
-        (5, "Python 实战课", "课程", 399.0),
-    ])
-    conn.executemany("INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
-        (1001, 1, 1, "2024-04-03", 1, 299, "公众号", "已支付"),
-        (1002, 2, 2, "2024-04-05", 1, 499, "搜索广告", "已支付"),
-        (1003, 1, 3, "2024-04-09", 2, 398, "公众号", "已支付"),
-        (1004, 3, 4, "2024-04-11", 1, 699, "短视频", "已支付"),
-        (1005, 4, 5, "2024-04-15", 1, 399, "搜索广告", "已支付"),
-        (1006, 5, 2, "2024-04-18", 1, 499, "短视频", "退款"),
-        (1007, 6, 1, "2024-05-02", 1, 299, "公众号", "已支付"),
-        (1008, 2, 4, "2024-05-04", 1, 699, "搜索广告", "已支付"),
-        (1009, 3, 5, "2024-05-07", 2, 798, "短视频", "已支付"),
-        (1010, 4, 3, "2024-05-10", 1, 199, "公众号", "已支付"),
-        (1011, 5, 1, "2024-05-13", 1, 299, "搜索广告", "已支付"),
-        (1012, 6, 2, "2024-05-20", 1, 499, "短视频", "已支付"),
-        (1013, 1, 4, "2024-06-01", 1, 699, "公众号", "已支付"),
-        (1014, 2, 5, "2024-06-03", 1, 399, "搜索广告", "已支付"),
-        (1015, 3, 3, "2024-06-06", 3, 597, "短视频", "已支付"),
-    ])
-    conn.commit()
-    conn.close()
+from nl2sql_core import (
+    MAX_UPLOAD_BYTES,
+    fallback_insight,
+    fallback_sql,
+    generate_insight,
+    generate_sql,
+    make_safe_columns,
+    read_uploaded_file,
+    repair_sql,
+    run_query,
+    sample_sales_data,
+    schema_text,
+    suggest_questions,
+    validate_sql,
+)
 
 
-def demo_schema_text() -> str:
-    return """数据库包含三张表：
-customers(customer_id INTEGER 主键, customer_name TEXT, city TEXT, signup_date TEXT)
-products(product_id INTEGER 主键, product_name TEXT, category TEXT, unit_price REAL)
-orders(order_id INTEGER 主键, customer_id INTEGER, product_id INTEGER, order_date TEXT, quantity INTEGER, amount REAL, channel TEXT, status TEXT)
-关联关系：orders.customer_id = customers.customer_id；orders.product_id = products.product_id。
-仅统计 status = '已支付' 的订单时，请在 WHERE 中过滤；日期字段格式为 YYYY-MM-DD。"""
-
-
-def make_safe_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
-    """给上传数据生成稳定的 SQLite 列名，并保留原始列名映射。"""
-    used: set[str] = set()
-    rename: dict[str, str] = {}
-    for index, original in enumerate(df.columns, start=1):
-        name = str(original).strip()
-        safe = name if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) else f"col_{index}"
-        if safe.lower() in {x.lower() for x in used}:
-            safe = f"{safe}_{index}"
-        used.add(safe)
-        rename[str(original)] = safe
-    return df.rename(columns=rename), rename
-
-
-def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
-    """读取 CSV/Excel，并给出对中文 CSV 的编码兜底。"""
-    name = uploaded_file.name.lower()
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file)
-    raw = uploaded_file.getvalue()
-    for encoding in ("utf-8-sig", "gb18030", "utf-8"):
-        try:
-            from io import BytesIO
-            return pd.read_csv(BytesIO(raw), encoding=encoding)
-        except UnicodeDecodeError:
-            continue
-    raise ValueError("无法识别 CSV 编码，请另存为 UTF-8 CSV。")
-
-
-def uploaded_schema_text(df: pd.DataFrame, mapping: dict[str, str]) -> str:
-    lines = ["当前只有一张用户上传的数据表：uploaded_data。请只使用这张表和下列安全列名生成 SQLite SELECT/WITH 查询。"]
-    lines.append("字段映射（安全列名 -> 原始列名）：")
-    for original, safe in mapping.items():
-        dtype = str(df[safe].dtype)
-        lines.append(f"- {safe} ({dtype}) -> {original}")
-    sample = df.head(3).to_dict(orient="records")
-    lines.append(f"样例数据（仅用于理解字段，不要照抄值）：{sample}")
-    return "\n".join(lines)
-
-
-def schema_text(df: pd.DataFrame | None = None, mapping: dict[str, str] | None = None) -> str:
-    if df is None:
-        return demo_schema_text()
-    return uploaded_schema_text(df, mapping or {str(c): str(c) for c in df.columns})
-
-
-def get_llm_sql(question: str, api_key: str, model: str, base_url: str, schema: str) -> tuple[str, str]:
-    """调用 DeepSeek 的 OpenAI 兼容接口；失败时由上层走规则兜底。"""
-    from openai import OpenAI  # type: ignore
-
-    client = OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
-    prompt = f"""你是资深数据分析师。根据用户问题生成 SQLite SQL。
-要求：只输出一条 SELECT 或 WITH 查询，不要 Markdown，不要解释；必须使用真实表和字段；默认限制最多 200 行。
-{schema}
-用户问题：{question}"""
-    response = client.chat.completions.create(
-        model=model, temperature=0, messages=[{"role": "user", "content": prompt}]
-    )
-    raw = response.choices[0].message.content or ""
-    sql = re.sub(r"```(?:sql)?", "", raw, flags=re.I).replace("```", "").strip()
-    return sql, "大语言模型"
-
-
-def fallback_sql(question: str, df: pd.DataFrame | None = None) -> tuple[str, str]:
-    if df is not None:
-        numeric = df.select_dtypes(include="number").columns.tolist()
-        categorical = [c for c in df.columns if c not in numeric]
-        if numeric and categorical:
-            group_col, metric_col = categorical[0], numeric[0]
-            qcol, qmetric = f'"{group_col}"', f'"{metric_col}"'
-            return (f"SELECT {qcol} AS 分组, ROUND(SUM({qmetric}), 2) AS 数值合计, "
-                    f"COUNT(*) AS 记录数 FROM uploaded_data GROUP BY {qcol} "
-                    "ORDER BY 数值合计 DESC LIMIT 200", "规则演示")
-        if numeric:
-            metric_col = numeric[0]
-            return (f'SELECT COUNT(*) AS 记录数, ROUND(SUM("{metric_col}"), 2) AS 数值合计, '
-                    f'ROUND(AVG("{metric_col}"), 2) AS 数值平均值 FROM uploaded_data LIMIT 200', "规则演示")
-        return ("SELECT * FROM uploaded_data LIMIT 200", "规则演示")
-    q = question.lower()
-    if any(x in q for x in ["渠道", "channel"]):
-        return ("SELECT channel AS 渠道, ROUND(SUM(amount), 2) AS 销售额, "
-                "COUNT(*) AS 订单数 FROM orders WHERE status='已支付' "
-                "GROUP BY channel ORDER BY 销售额 DESC LIMIT 200", "规则演示")
-    if any(x in q for x in ["商品", "产品", "product"]):
-        return ("SELECT p.product_name AS 商品, ROUND(SUM(o.amount), 2) AS 销售额, "
-                "SUM(o.quantity) AS 销量 FROM orders o JOIN products p ON o.product_id=p.product_id "
-                "WHERE o.status='已支付' GROUP BY p.product_id ORDER BY 销售额 DESC LIMIT 200", "规则演示")
-    if any(x in q for x in ["城市", "地区", "city"]):
-        return ("SELECT c.city AS 城市, ROUND(SUM(o.amount), 2) AS 销售额, COUNT(DISTINCT c.customer_id) AS 客户数 "
-                "FROM orders o JOIN customers c ON o.customer_id=c.customer_id WHERE o.status='已支付' "
-                "GROUP BY c.city ORDER BY 销售额 DESC LIMIT 200", "规则演示")
-    if any(x in q for x in ["月份", "月度", "趋势", "month"]):
-        return ("SELECT substr(order_date,1,7) AS 月份, ROUND(SUM(amount), 2) AS 销售额 "
-                "FROM orders WHERE status='已支付' GROUP BY 月份 ORDER BY 月份 LIMIT 200", "规则演示")
-    return ("SELECT COUNT(*) AS 已支付订单数, ROUND(SUM(amount), 2) AS 总销售额, "
-            "ROUND(AVG(amount), 2) AS 平均客单价 FROM orders WHERE status='已支付' LIMIT 200", "规则演示")
-
-
-def validate_sql(sql: str) -> tuple[bool, str]:
-    normalized = re.sub(r"\s+", " ", sql.strip()).lower()
-    if not normalized:
-        return False, "未生成 SQL。"
-    if ";" in normalized.rstrip(";"):
-        return False, "仅允许执行一条 SQL。"
-    if not re.match(r"^(select|with)\b", normalized):
-        return False, "出于安全考虑，仅允许 SELECT/WITH 查询。"
-    forbidden = r"\b(insert|update|delete|drop|alter|create|attach|pragma|replace|vacuum)\b"
-    if re.search(forbidden, normalized):
-        return False, "检测到可能修改数据的关键字，已拦截。"
-    return True, ""
-
-
-def run_query(sql: str, data: pd.DataFrame | None = None) -> pd.DataFrame:
-    if data is None:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    else:
-        conn = sqlite3.connect(":memory:")
-        data.to_sql("uploaded_data", conn, index=False, if_exists="replace")
-    conn.execute("PRAGMA query_only = ON")
+def secret(name: str, default: str = "") -> str:
     try:
-        return pd.read_sql_query(sql, conn)
-    finally:
-        conn.close()
+        value = st.secrets.get(name, os.getenv(name, default))
+        return str(value)
+    except Exception:
+        return os.getenv(name, default)
+
+
+def set_question(value: str) -> None:
+    st.session_state.question_input = value
+
+
+def get_data() -> tuple[pd.DataFrame | None, dict[str, str], str]:
+    if st.session_state.data_mode == "一键示例数据":
+        raw = sample_sales_data()
+        data, mapping = make_safe_columns(raw)
+        return data, mapping, "虚拟销售数据"
+    uploaded = st.session_state.get("uploaded_file")
+    if uploaded is None:
+        return None, {}, "等待上传"
+    raw = read_uploaded_file(uploaded)
+    data, mapping = make_safe_columns(raw)
+    return data, mapping, uploaded.name
 
 
 st.set_page_config(page_title="NL2SQL 智能查询", page_icon="🔎", layout="wide")
-init_db()
-
 st.markdown("# 🔎 NL2SQL 智能查询系统")
-st.caption("用自然语言查询业务数据 · 自动生成 SQL · 安全只读执行 · 支持结果可视化")
+st.caption("上传业务数据，用自然语言完成查询、图表和结论生成")
 
 with st.sidebar:
-    st.header("连接设置")
-    api_key = st.text_input("DeepSeek API Key（可选）", type="password", value=os.getenv("DEEPSEEK_API_KEY", ""))
-    base_url = st.text_input("API Base URL", value=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-    model = st.text_input("模型 ID", value=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"), help="已按你的要求预填 deepseek-v4-pro；若接口提示模型不存在，请改成服务商控制台显示的准确模型 ID。")
-    st.info("未填写 Key 时使用规则演示模式，适合快速体验。")
-    st.divider()
     st.header("数据源")
-    uploaded_file = st.file_uploader("上传 CSV 或 Excel", type=["csv", "xlsx", "xls"], help="上传后，问题会查询你的文件，而不是内置示例库。")
-    if uploaded_file is not None:
-        try:
-            uploaded_raw = read_uploaded_file(uploaded_file)
-            uploaded_data, uploaded_mapping = make_safe_columns(uploaded_raw)
-            st.session_state.uploaded_data = uploaded_data
-            st.session_state.uploaded_mapping = uploaded_mapping
-            st.success(f"已加载 {uploaded_file.name} · {len(uploaded_data):,} 行 × {len(uploaded_data.columns)} 列")
-        except Exception as exc:
-            st.error(f"文件读取失败：{exc}")
-            st.session_state.uploaded_data = None
-            st.session_state.uploaded_mapping = None
+    st.radio("选择数据", ["一键示例数据", "上传 CSV / Excel"], key="data_mode")
+    if st.session_state.data_mode == "上传 CSV / Excel":
+        st.file_uploader(
+            "选择文件",
+            type=["csv", "xlsx", "xls"],
+            key="uploaded_file",
+            help=f"最大 {MAX_UPLOAD_BYTES // 1024 // 1024} MB、最多 100,000 行。",
+        )
+        st.caption("隐私提示：默认只向模型发送字段名和类型，不发送原始数据行。")
     else:
-        st.session_state.uploaded_data = None
-        st.session_state.uploaded_mapping = None
-    st.divider()
-    st.subheader("示例问题")
-    examples = ["各渠道的销售额和订单数是多少？", "销售额最高的商品有哪些？", "按月份看销售额趋势", "哪个城市的销售额最高？"]
-    for example in examples:
-        if st.button(example, use_container_width=True):
-            st.session_state.question = example
+        st.caption("已准备 60 行虚拟销售数据，适合直接体验。")
 
-question = st.text_area("输入你的问题", value=st.session_state.get("question", ""),
-                        placeholder="例如：各渠道的销售额和订单数是多少？", height=90)
-run = st.button("生成 SQL 并执行", type="primary", use_container_width=False)
+    st.divider()
+    st.header("模型设置")
+    api_key = st.text_input("DeepSeek API Key（可选）", type="password", value=secret("DEEPSEEK_API_KEY"))
+    base_url = st.text_input("API Base URL", value=secret("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+    model = st.text_input("模型 ID", value=secret("DEEPSEEK_MODEL", "deepseek-v4-pro"), help="已按项目配置预填 deepseek-v4-pro；请以服务商控制台显示的模型 ID 为准。")
+    include_samples = st.toggle("允许向模型发送前三行样例", value=False, help="字段含义不明确时可提高生成准确率；请勿用于敏感数据。")
+    use_ai_insight = st.toggle("使用模型生成业务洞察", value=False, help="开启后会将查询结果前 20 行发送给模型；关闭则使用本地规则生成摘要。")
+    st.caption("未配置 Key 时自动使用本地规则模式，所有数据留在本机。")
+
+try:
+    active_data, active_mapping, source_name = get_data()
+except Exception as exc:
+    active_data, active_mapping, source_name = None, {}, "读取失败"
+    st.error(f"数据读取失败：{exc}")
+
+if active_data is None:
+    st.info("请在左侧上传 CSV 或 Excel，或切换到“一键示例数据”。")
+    st.stop()
+
+fingerprint = int(pd.util.hash_pandas_object(active_data.head(5), index=True).sum()) if not active_data.empty else 0
+source_signature = f"{source_name}|{active_data.shape}|{fingerprint}|{','.join(map(str, active_data.columns))}"
+if st.session_state.get("result_source_signature") != source_signature:
+    for key in ("last_result", "last_sql", "last_insight", "last_source", "last_truncated", "last_repaired"):
+        st.session_state.pop(key, None)
+    st.session_state.result_source_signature = source_signature
+
+suggestions = suggest_questions(active_data, active_mapping)
+schema = schema_text(active_data, active_mapping, include_samples=include_samples)
+
+m1, m2, m3 = st.columns(3)
+m1.metric("数据行数", f"{len(active_data):,}")
+m2.metric("字段数量", len(active_data.columns))
+m3.metric("当前数据源", source_name)
+
+st.subheader("推荐问题")
+question_columns = st.columns(min(len(suggestions), 3))
+for index, suggestion in enumerate(suggestions):
+    with question_columns[index % len(question_columns)]:
+        st.button(
+            suggestion,
+            key=f"suggestion_{index}_{source_name}",
+            width="stretch",
+            on_click=set_question,
+            args=(suggestion,),
+        )
+
+question = st.text_area("输入你的问题", key="question_input", placeholder="例如：各渠道的销售额和订单数是多少？", height=90)
+run = st.button("生成 SQL 并执行", type="primary")
 
 if run:
     if not question.strip():
         st.warning("请先输入一个问题。")
     else:
-        with st.spinner("正在理解问题并生成查询…"):
-            try:
-                query_data = st.session_state.get("uploaded_data")
-                query_mapping = st.session_state.get("uploaded_mapping") or {}
-                current_schema = schema_text(query_data, query_mapping) if query_data is not None else schema_text()
-                if api_key.strip():
-                    sql, source = get_llm_sql(question.strip(), api_key.strip(), model.strip(), base_url.strip(), current_schema)
-                else:
-                    sql, source = fallback_sql(question.strip(), query_data)
-            except Exception as exc:
-                st.warning(f"模型调用失败，已切换到规则演示：{exc}")
-                sql, source = fallback_sql(question.strip(), st.session_state.get("uploaded_data"))
-        valid, error = validate_sql(sql)
-        if not valid:
-            st.error(error)
-        else:
-            try:
-                result = run_query(sql, st.session_state.get("uploaded_data"))
-                st.session_state.history = st.session_state.get("history", [])
-                st.session_state.history.insert(0, {"time": datetime.now().strftime("%H:%M:%S"), "question": question, "sql": sql, "rows": len(result)})
-                st.success(f"查询完成 · {source} · 返回 {len(result)} 行")
-                left, right = st.columns([1.2, 1])
-                with left:
-                    st.subheader("查询结果")
-                    st.dataframe(result, use_container_width=True, hide_index=True)
-                    st.download_button("下载 CSV", result.to_csv(index=False).encode("utf-8-sig"), "query_result.csv", "text/csv")
-                with right:
-                    st.subheader("快速图表")
-                    numeric = result.select_dtypes(include="number").columns.tolist()
-                    categorical = [c for c in result.columns if c not in numeric]
-                    if categorical and numeric:
-                        chart_df = result.set_index(categorical[0])[[numeric[0]]]
-                        st.bar_chart(chart_df)
-                    else:
-                        st.caption("结果包含可视化所需的分类列和数值列后，图表会自动出现。")
-                with st.expander("查看生成的 SQL", expanded=True):
-                    st.code(sql, language="sql")
-            except Exception as exc:
-                st.error(f"SQL 执行失败：{exc}")
+        sql = ""
+        source = "本地规则"
+        with st.spinner("正在理解问题并查询数据…"):
+            if api_key.strip():
+                try:
+                    sql = generate_sql(question, schema, api_key.strip(), model.strip(), base_url.strip())
+                    source = "大语言模型"
+                except Exception as exc:
+                    st.warning(f"模型调用失败，已切换到本地规则：{exc}")
+            if not sql:
+                sql = fallback_sql(question, active_data, active_mapping)
 
-tab_schema, tab_history = st.tabs(["数据字典", "查询历史"])
+            valid, validation_error = validate_sql(sql)
+            if not valid:
+                st.error(validation_error)
+                st.stop()
+
+            repaired = False
+            try:
+                result, truncated = run_query(sql, active_data)
+            except Exception as first_error:
+                if api_key.strip():
+                    try:
+                        repaired_sql = repair_sql(question, schema, sql, str(first_error), api_key.strip(), model.strip(), base_url.strip())
+                        valid, validation_error = validate_sql(repaired_sql)
+                        if not valid:
+                            raise ValueError(validation_error)
+                        result, truncated = run_query(repaired_sql, active_data)
+                        sql, repaired = repaired_sql, True
+                        source = "大语言模型自动修复"
+                    except Exception as repair_error:
+                        st.error(f"SQL 执行失败，自动修复也未成功：{repair_error}")
+                        st.stop()
+                else:
+                    st.error(f"SQL 执行失败：{first_error}")
+                    st.stop()
+
+            try:
+                insight = generate_insight(
+                    question,
+                    sql,
+                    result,
+                    api_key.strip() if use_ai_insight else "",
+                    model.strip(),
+                    base_url.strip(),
+                )
+            except Exception:
+                insight = fallback_insight(question, result)
+
+        st.session_state.last_result = result
+        st.session_state.last_sql = sql
+        st.session_state.last_insight = insight
+        st.session_state.last_source = source
+        st.session_state.last_truncated = truncated
+        st.session_state.last_repaired = repaired
+        st.session_state.history = st.session_state.get("history", [])
+        st.session_state.history.insert(0, {"时间": datetime.now().strftime("%H:%M:%S"), "问题": question, "模式": source, "返回行数": len(result), "SQL": sql})
+
+if st.session_state.get("last_result") is not None:
+    result = st.session_state.last_result
+    sql = st.session_state.last_sql
+    insight = st.session_state.last_insight
+    source = st.session_state.last_source
+    truncated = st.session_state.last_truncated
+    repaired = st.session_state.last_repaired
+    st.success(f"查询完成 · {source} · 返回 {len(result)} 行" + (" · 已自动修复" if repaired else ""))
+    if truncated:
+        st.warning("结果超过 200 行，页面仅展示前 200 行。")
+    st.subheader("数据洞察")
+    st.write(insight)
+    left, right = st.columns([1.2, 1])
+    with left:
+        st.subheader("查询结果")
+        st.dataframe(result, width="stretch", hide_index=True)
+        st.download_button("下载查询结果 CSV", result.to_csv(index=False).encode("utf-8-sig"), "query_result.csv", "text/csv")
+    with right:
+        st.subheader("快速图表")
+        numeric = result.select_dtypes(include="number").columns.tolist()
+        categorical = [c for c in result.columns if c not in numeric]
+        if categorical and numeric and 1 < len(result) <= 50:
+            st.bar_chart(result.set_index(categorical[0])[[numeric[0]]])
+        else:
+            st.caption("结果包含分类列和数值列，且不超过 50 行时自动生成图表。")
+    with st.expander("查看生成的 SQL", expanded=True):
+        st.code(sql, language="sql")
+
+tab_preview, tab_schema, tab_history, tab_eval, tab_about = st.tabs(["数据预览", "数据字典", "查询历史", "能力评测", "安全说明"])
+with tab_preview:
+    st.dataframe(active_data.head(20), width="stretch", hide_index=True)
 with tab_schema:
-    active_data = st.session_state.get("uploaded_data")
-    active_mapping = st.session_state.get("uploaded_mapping")
-    if active_data is not None:
-        st.caption("当前查询数据源：你上传的文件（表名：uploaded_data）")
-        st.dataframe(active_data.head(10), use_container_width=True, hide_index=True)
-        st.code(schema_text(active_data, active_mapping), language="text")
-    else:
-        st.caption("当前查询数据源：内置演示数据库")
-        st.code(schema_text(), language="text")
+    st.code(schema, language="text")
 with tab_history:
     history = st.session_state.get("history", [])
     if history:
-        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(history), width="stretch", hide_index=True)
     else:
         st.caption("本次会话还没有查询记录。")
+with tab_eval:
+    st.caption("以下是本地规则模式的回归检查，用于验证换数据后核心流程仍可运行。接入模型后的 SQL 质量还应结合业务标注集评估。")
+    evaluation_cases = [
+        ("按渠道汇总", "各渠道的销售额分别是多少？", "渠道"),
+        ("按月份趋势", "按月份查看销售额趋势。", "月份"),
+        ("退款统计", "退款订单有多少笔，退款金额是多少？", "记录数"),
+        ("总量汇总", "这份数据一共有多少条记录？", "记录数"),
+    ]
+    eval_rows = []
+    for case_name, eval_question, expected_column in evaluation_cases:
+        try:
+            eval_sql = fallback_sql(eval_question, active_data, active_mapping)
+            eval_result, _ = run_query(eval_sql, active_data)
+            passed = expected_column in eval_result.columns and len(eval_result) > 0
+            eval_rows.append({"检查项": case_name, "结果": "通过" if passed else "未通过", "返回行数": len(eval_result)})
+        except Exception as exc:
+            eval_rows.append({"检查项": case_name, "结果": f"失败：{exc}", "返回行数": 0})
+    passed_count = sum(row["结果"] == "通过" for row in eval_rows)
+    st.metric("回归检查通过率", f"{passed_count}/{len(eval_rows)}")
+    st.dataframe(pd.DataFrame(eval_rows), width="stretch", hide_index=True)
+with tab_about:
+    st.markdown("""
+- 仅允许执行 `SELECT` / `WITH` 查询，并拦截写入、DDL、系统表和危险关键字。
+- 查询运行在临时 SQLite 数据库中，限制执行时间和返回行数。
+- 默认只向模型发送字段名、原始列名和数据类型；开启样例选项后才发送前三行。
+- 上传文件只在当前应用会话中处理，不写入项目目录。
+""")

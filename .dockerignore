@@ -1,0 +1,8 @@
+.git
+.github
+.streamlit/secrets.toml
+__pycache__
+*.pyc
+*.db
+tests
+assets
